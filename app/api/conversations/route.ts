@@ -81,7 +81,7 @@ export async function GET() {
       timestamp: Date
     }
 
-    const formattedConversations: FormattedConversation[] = conversations.map((conversation: { id: string; name: string; participants: any[]; messages: any[]; updatedAt: Date }) => {
+    const formattedConversations: FormattedConversation[] = conversations.map((conversation: { id: string; name: string | null; participants: any[]; messages: any[]; updatedAt: Date }) => {
       const otherParticipants = conversation.participants.filter(
         (participant) => participant.userId !== session.user.id,
       )
@@ -92,7 +92,7 @@ export async function GET() {
 
       return {
         id: conversation.id,
-        name: isGroup ? conversation.name : otherParticipants[0]?.user.name || "Unknown",
+        name: isGroup ? (conversation.name || "Unnamed Group") : otherParticipants[0]?.user.name || "Unknown",
         image: isGroup ? null : otherParticipants[0]?.user.image || null,
         isGroup,
         lastMessage: lastMessage
