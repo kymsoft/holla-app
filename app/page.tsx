@@ -92,7 +92,7 @@ export default function Home() {
       </main>
       <footer className="container mx-auto py-6 border-t border-blue-900/50">
         <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-          <p className="text-blue-400">© 2023 Holla. All rights reserved.</p>
+          <p className="text-blue-400">© 2025 Holla. All rights reserved.</p>
           <div className="flex gap-6">
             <Link href="/terms" className="text-blue-400 hover:text-blue-300">
               Terms
