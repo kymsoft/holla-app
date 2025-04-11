@@ -126,31 +126,50 @@ export const sendMessage = async (
     senderId: string
     senderName: string
   },
-  onSuccess?: (localMessageId: string) => void,
+  onSuccess?: (localMessageId: string, messageId: string) => void,
 ): Promise<string> => {
   const localMessageId = `local-${Date.now()}`
 
-  // Store message in local queue if offline
-  if (!socket?.connected) {
-    storeOfflineMessage(message, localMessageId)
-    return localMessageId
-  }
-
   try {
-    // Send message through socket
-    socket.emit("send-message", {
-      ...message,
-      localMessageId,
+    // First, save the message to the database via REST API
+    const response = await fetch("/api/messages/send", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...message,
+        localMessageId,
+      }),
     })
 
+    if (!response.ok) {
+      throw new Error("Failed to save message")
+    }
+
+    const data = await response.json()
+    const savedMessageId = data.message.id
+
+    // Then, if socket is connected, emit the message for real-time delivery
+    if (socket?.connected) {
+      socket.emit("send-message", {
+        ...message,
+        localMessageId,
+        messageId: savedMessageId,
+      })
+    }
+
     if (onSuccess) {
-      onSuccess(localMessageId)
+      onSuccess(localMessageId, savedMessageId)
     }
 
     return localMessageId
   } catch (error) {
     console.error("Error sending message:", error)
+
+    // Store message in local queue if offline or error
     storeOfflineMessage(message, localMessageId)
+
     return localMessageId
   }
 }
@@ -167,7 +186,7 @@ const storeOfflineMessage = (message: any, localMessageId: string) => {
 }
 
 // Send stored offline messages when back online
-export const sendOfflineMessages = () => {
+export const sendOfflineMessages = async () => {
   const { toast } = useToast()
   if (!socket?.connected) return
 
@@ -176,9 +195,23 @@ export const sendOfflineMessages = () => {
 
   console.log(`Sending ${offlineMessages.length} offline messages`)
 
-  offlineMessages.forEach((message: any) => {
-    socket?.emit("send-message", message)
-  })
+  for (const message of offlineMessages) {
+    try {
+      // First save to database
+      await fetch("/api/messages/send", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(message),
+      })
+
+      // Then emit for real-time delivery
+      socket.emit("send-message", message)
+    } catch (error) {
+      console.error("Error sending offline message:", error)
+    }
+  }
 
   // Clear offline messages
   localStorage.setItem("offlineMessages", "[]")

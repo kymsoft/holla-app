@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -20,7 +20,6 @@ import {
   Check,
   CheckCheck,
   Clock,
-  Info,
   Phone,
   Video,
   ImageIcon,
@@ -75,6 +74,7 @@ export default function ChatPage() {
   const [newMessage, setNewMessage] = useState("")
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false)
   const [pendingMessages, setPendingMessages] = useState<Record<string, Message[]>>({})
   const [isReconnecting, setIsReconnecting] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -89,7 +89,7 @@ export default function ChatPage() {
   const conversationId = searchParams?.get("conversationId") || null
 
   // Fetch conversations
-  const fetchConversations = async () => {
+  const fetchConversations = useCallback(async () => {
     if (!user) return
 
     try {
@@ -116,14 +116,14 @@ export default function ChatPage() {
       })
       setIsLoading(false)
     }
-  }
+  }, [user, toast, conversationId])
 
   useEffect(() => {
     fetchConversations()
     // Refresh conversations every 30 seconds
     const intervalId = setInterval(fetchConversations, 30000)
     return () => clearInterval(intervalId)
-  }, [user, toast, conversationId])
+  }, [fetchConversations])
 
   // Set first conversation as active by default if none is selected
   useEffect(() => {
@@ -133,14 +133,22 @@ export default function ChatPage() {
   }, [conversations, activeConversation, isLoading, conversationId])
 
   // Fetch messages for active conversation
-  const fetchMessages = async () => {
+  const fetchMessages = useCallback(async () => {
     if (!activeConversation) return
 
+    setIsLoadingMessages(true)
     try {
       const res = await fetch(`/api/messages?conversationId=${activeConversation.id}`)
       if (res.ok) {
         const data = await res.json()
-        setMessages(data.messages)
+
+        // Process messages to mark own messages
+        const processedMessages = data.messages.map((msg: Message) => ({
+          ...msg,
+          isOwnMessage: msg.senderId === user?.id,
+        }))
+
+        setMessages(processedMessages)
 
         // Mark messages as read
         if (socket && user && socket.connected) {
@@ -164,6 +172,16 @@ export default function ChatPage() {
 
         // Update URL with conversation ID
         router.push(`/chat?conversationId=${activeConversation.id}`, { scroll: false })
+
+        // Update unread count in conversation list
+        setConversations((prev) =>
+          prev.map((conv) => {
+            if (conv.id === activeConversation.id) {
+              return { ...conv, unread: 0 }
+            }
+            return conv
+          }),
+        )
       }
     } catch (error) {
       console.error("Error fetching messages:", error)
@@ -172,28 +190,32 @@ export default function ChatPage() {
         description: "Failed to load messages",
         variant: "destructive",
       })
+    } finally {
+      setIsLoadingMessages(false)
     }
-  }
+  }, [activeConversation, socket, user, pendingMessages, router, toast])
 
   useEffect(() => {
-    fetchMessages()
+    if (activeConversation) {
+      fetchMessages()
 
-    // Join the conversation room via socket
-    if (socket && activeConversation && socket.connected) {
-      socket.emit("join-conversation", activeConversation.id)
-    }
+      // Join the conversation room via socket
+      if (socket && socket.connected) {
+        socket.emit("join-conversation", activeConversation.id)
+      }
 
-    // Refresh messages every 15 seconds
-    const intervalId = setInterval(fetchMessages, 15000)
+      // Refresh messages every 15 seconds
+      const intervalId = setInterval(fetchMessages, 15000)
 
-    return () => {
-      clearInterval(intervalId)
-      // Leave the conversation room when changing conversations
-      if (socket && activeConversation && socket.connected) {
-        socket.emit("leave-conversation", activeConversation.id)
+      return () => {
+        clearInterval(intervalId)
+        // Leave the conversation room when changing conversations
+        if (socket && socket.connected) {
+          socket.emit("leave-conversation", activeConversation.id)
+        }
       }
     }
-  }, [activeConversation, socket, isConnected])
+  }, [activeConversation, socket, isConnected, fetchMessages])
 
   // Listen for socket events
   useEffect(() => {
@@ -202,6 +224,10 @@ export default function ChatPage() {
     const handleNewMessage = (message: Message) => {
       console.log("New message received:", message)
 
+      // Mark message as own if sent by current user
+      const isOwnMessage = message.senderId === user?.id
+      const messageWithOwnership = { ...message, isOwnMessage }
+
       // If this is for the active conversation, add it to messages
       if (activeConversation && activeConversation.id === message.id.split("-")[0]) {
         setMessages((prev) => {
@@ -209,11 +235,11 @@ export default function ChatPage() {
           if (prev.some((m) => m.id === message.id)) {
             return prev
           }
-          return [...prev, message]
+          return [...prev, messageWithOwnership]
         })
 
         // Mark as read if it's not from the current user
-        if (message.senderId !== user?.id && socket && socket.connected) {
+        if (!isOwnMessage && socket && socket.connected) {
           socket.emit("mark-messages-read", {
             conversationId: activeConversation.id,
             userId: user?.id,
@@ -230,12 +256,12 @@ export default function ChatPage() {
           }
           return {
             ...prev,
-            [conversationId]: [...existing, message],
+            [conversationId]: [...existing, messageWithOwnership],
           }
         })
 
         // Update unread count for the conversation
-        if (message.senderId !== user?.id) {
+        if (!isOwnMessage) {
           setConversations((prev) =>
             prev.map((conv) => {
               if (conv.id === conversationId) {
@@ -264,11 +290,17 @@ export default function ChatPage() {
     }: { conversationId: string; messages: Message[] }) => {
       console.log("Undelivered messages received for conversation:", conversationId, undeliveredMsgs)
 
+      // Process messages to mark own messages
+      const processedMessages = undeliveredMsgs.map((msg) => ({
+        ...msg,
+        isOwnMessage: msg.senderId === user?.id,
+      }))
+
       // If this is for the active conversation, add them to messages
       if (activeConversation && activeConversation.id === conversationId) {
         setMessages((prev) => {
           // Filter out duplicates
-          const newMessages = undeliveredMsgs.filter(
+          const newMessages = processedMessages.filter(
             (newMsg) => !prev.some((existingMsg) => existingMsg.id === newMsg.id),
           )
           return [...prev, ...newMessages]
@@ -286,7 +318,7 @@ export default function ChatPage() {
         setPendingMessages((prev) => {
           const existing = prev[conversationId] || []
           // Filter out duplicates
-          const newMessages = undeliveredMsgs.filter(
+          const newMessages = processedMessages.filter(
             (newMsg) => !existing.some((existingMsg) => existingMsg.id === newMsg.id),
           )
           return {
@@ -299,10 +331,10 @@ export default function ChatPage() {
         setConversations((prev) =>
           prev.map((conv) => {
             if (conv.id === conversationId) {
-              const lastMsg = undeliveredMsgs[undeliveredMsgs.length - 1]
+              const lastMsg = processedMessages[processedMessages.length - 1]
               return {
                 ...conv,
-                unread: conv.unread + undeliveredMsgs.length,
+                unread: conv.unread + processedMessages.length,
                 lastMessage: {
                   content: lastMsg.content,
                   sender: lastMsg.senderName,
@@ -479,12 +511,25 @@ export default function ChatPage() {
     setNewMessage("")
 
     // Send via socket service (handles offline case)
-    await sendMessage({
-      content: newMessage,
-      conversationId: activeConversation.id,
-      senderId: user.id,
-      senderName: user.name,
-    })
+    await sendMessage(
+      {
+        content: newMessage,
+        conversationId: activeConversation.id,
+        senderId: user.id,
+        senderName: user.name,
+      },
+      (localMsgId, messageId) => {
+        // Update the message with the real ID from the server
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.localMessageId === localMsgId) {
+              return { ...msg, id: messageId, status: "sent" as MessageStatus }
+            }
+            return msg
+          }),
+        )
+      },
+    )
   }
 
   const handleReconnect = async () => {
@@ -804,15 +849,20 @@ export default function ChatPage() {
                     variant="ghost"
                     size="icon"
                     className="text-blue-300 hover:text-blue-100 hover:bg-blue-900/50"
+                    onClick={fetchMessages}
                   >
-                    <Info className="h-5 w-5" />
+                    <RefreshCw className={`h-5 w-5 ${isLoadingMessages ? "animate-spin" : ""}`} />
                   </Button>
                 </div>
               </div>
 
               {/* Messages */}
               <div className="flex-1 overflow-y-auto p-4 space-y-6">
-                {groupedMessages.length > 0 ? (
+                {isLoadingMessages ? (
+                  <div className="flex justify-center py-4">
+                    <RefreshCw className="h-6 w-6 text-blue-400 animate-spin" />
+                  </div>
+                ) : groupedMessages.length > 0 ? (
                   groupedMessages.map((group, groupIndex) => (
                     <div key={groupIndex} className="space-y-4">
                       <div className="flex justify-center">
