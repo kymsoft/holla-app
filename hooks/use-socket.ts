@@ -1,51 +1,48 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { io, type Socket } from "socket.io-client"
+import type { Socket } from "socket.io-client"
 import { useAuth } from "@/app/auth-provider"
+import { initializeSocket, disconnectSocket, getSocket, sendOfflineMessages } from "@/lib/socket-service"
 
 export const useSocket = () => {
-  const [socket, setSocket] = useState<Socket | null>(null)
   const [isConnected, setIsConnected] = useState(false)
   const { user } = useAuth()
 
   useEffect(() => {
-    // Initialize socket connection
-    const socketInit = async () => {
-      await fetch("/api/socket")
+    if (!user?.id) return
 
-      const socketInstance = io({
-        path: "/api/socket",
-      })
+    let socket: Socket | null = null
 
-      socketInstance.on("connect", () => {
-        console.log("Socket connected")
+    const setupSocket = async () => {
+      socket = await initializeSocket(user.id)
+
+      const handleConnect = () => {
         setIsConnected(true)
+        sendOfflineMessages()
+      }
 
-        // Notify server that user is online
-        if (user?.id) {
-          socketInstance.emit("user-online", user.id)
-        }
-      })
-
-      socketInstance.on("disconnect", () => {
-        console.log("Socket disconnected")
+      const handleDisconnect = () => {
         setIsConnected(false)
-      })
+      }
 
-      setSocket(socketInstance)
+      socket.on("connect", handleConnect)
+      socket.on("disconnect", handleDisconnect)
+
+      // Set initial connection state
+      setIsConnected(socket.connected)
     }
 
-    if (!socket && user) {
-      socketInit()
-    }
+    setupSocket()
 
     return () => {
       if (socket) {
-        socket.disconnect()
+        socket.off("connect")
+        socket.off("disconnect")
       }
+      disconnectSocket()
     }
-  }, [socket, user])
+  }, [user?.id])
 
-  return { socket, isConnected }
+  return { socket: getSocket(), isConnected }
 }

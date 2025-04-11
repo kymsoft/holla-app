@@ -8,20 +8,38 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Card, CardContent } from "@/components/ui/card"
-import { MessageCircle, Search, Settings, LogOut, Send, Users, Moon, Sun, PlusCircle } from "lucide-react"
+import {
+  MessageCircle,
+  Search,
+  Settings,
+  LogOut,
+  Send,
+  Users,
+  Moon,
+  Sun,
+  PlusCircle,
+  Check,
+  CheckCheck,
+  Clock,
+} from "lucide-react"
 import { useAuth } from "@/app/auth-provider"
 import { useTheme } from "next-themes"
 import { cn } from "@/lib/utils"
 import { useToast } from "@/components/ui/use-toast";
 import { useSocket } from "@/hooks/use-socket"
+import { sendMessage } from "@/lib/socket-service"
+
+type MessageStatus = "sending" | "sent" | "delivered" | "read" | "error"
 
 type Message = {
   id: string
+  localMessageId?: string
   content: string
   senderId: string
   senderName: string
   senderImage?: string
   timestamp: Date
+  status?: MessageStatus
 }
 
 type Conversation = {
@@ -43,6 +61,7 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState("")
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [pendingMessages, setPendingMessages] = useState<Record<string, Message[]>>({})
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { user, logout } = useAuth()
   const { theme, setTheme } = useTheme()
@@ -98,6 +117,26 @@ export default function ChatPage() {
         if (res.ok) {
           const data = await res.json()
           setMessages(data.messages)
+
+          // Mark messages as read
+          if (socket && user) {
+            socket.emit("mark-messages-read", {
+              conversationId: activeConversation.id,
+              userId: user.id,
+            })
+          }
+
+          // Add any pending messages for this conversation
+          if (pendingMessages[activeConversation.id]) {
+            setMessages((prev) => [...prev, ...pendingMessages[activeConversation.id]])
+
+            // Clear pending messages for this conversation
+            setPendingMessages((prev) => {
+              const updated = { ...prev }
+              delete updated[activeConversation.id]
+              return updated
+            })
+          }
         }
       } catch (error) {
         console.error("Error fetching messages:", error)
@@ -122,28 +161,118 @@ export default function ChatPage() {
         socket.emit("leave-conversation", activeConversation.id)
       }
     }
-  }, [activeConversation, socket, toast])
+  }, [activeConversation, socket, toast, user, pendingMessages])
 
-  // Listen for new messages
+  // Listen for socket events
   useEffect(() => {
     if (!socket) return
 
     const handleNewMessage = (message: Message) => {
-      setMessages((prev) => [...prev, message])
+      // If this is for the active conversation, add it to messages
+      if (activeConversation && message.id.includes(activeConversation.id)) {
+        setMessages((prev) => [...prev, message])
 
-      // Update conversation last message if it's the active conversation
-      if (activeConversation && message.senderId !== user?.id) {
+        // Mark as read if it's not from the current user
+        if (message.senderId !== user?.id && socket) {
+          socket.emit("mark-messages-read", {
+            conversationId: activeConversation.id,
+            userId: user?.id,
+          })
+        }
+      } else {
+        // Store as pending for other conversations
+        setPendingMessages((prev) => {
+          const conversationId = message.id.split("-")[0]
+          return {
+            ...prev,
+            [conversationId]: [...(prev[conversationId] || []), message],
+          }
+        })
+
+        // Update unread count for the conversation
+        if (message.senderId !== user?.id) {
+          setConversations((prev) =>
+            prev.map((conv) => {
+              if (conv.id === message.id.split("-")[0]) {
+                return {
+                  ...conv,
+                  unread: conv.unread + 1,
+                  lastMessage: message.content,
+                  lastMessageTime: message.timestamp,
+                }
+              }
+              return conv
+            }),
+          )
+        }
+      }
+    }
+
+    const handlePendingMessages = ({
+      conversationId,
+      messages: pendingMsgs,
+    }: { conversationId: string; messages: Message[] }) => {
+      // If this is for the active conversation, add them to messages
+      if (activeConversation && activeConversation.id === conversationId) {
+        setMessages((prev) => [...prev, ...pendingMsgs])
+
+        // Mark as read
+        if (socket && user) {
+          socket.emit("mark-messages-read", {
+            conversationId,
+            userId: user.id,
+          })
+        }
+      } else {
+        // Store as pending for other conversations
+        setPendingMessages((prev) => ({
+          ...prev,
+          [conversationId]: [...(prev[conversationId] || []), ...pendingMsgs],
+        }))
+
+        // Update unread count for the conversation
         setConversations((prev) =>
           prev.map((conv) => {
-            if (conv.id === activeConversation.id) {
+            if (conv.id === conversationId) {
+              const lastMsg = pendingMsgs[pendingMsgs.length - 1]
               return {
                 ...conv,
-                lastMessage: message.content,
-                lastMessageTime: message.timestamp,
-                unread: message.senderId !== user?.id ? conv.unread + 1 : conv.unread,
+                unread: conv.unread + pendingMsgs.length,
+                lastMessage: lastMsg.content,
+                lastMessageTime: lastMsg.timestamp,
               }
             }
             return conv
+          }),
+        )
+      }
+    }
+
+    const handleMessageSent = ({ localMessageId, messageId }: { localMessageId: string; messageId: string }) => {
+      // Update message status from sending to sent
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.localMessageId === localMessageId) {
+            return { ...msg, id: messageId, status: "sent" as MessageStatus }
+          }
+          return msg
+        }),
+      )
+    }
+
+    const handleMessagesRead = ({
+      messageIds,
+      readBy,
+      conversationId,
+    }: { messageIds: string[]; readBy: string; conversationId: string }) => {
+      // Update message status to read
+      if (activeConversation && activeConversation.id === conversationId) {
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (messageIds.includes(msg.id)) {
+              return { ...msg, status: "read" as MessageStatus }
+            }
+            return msg
           }),
         )
       }
@@ -163,10 +292,16 @@ export default function ChatPage() {
     }
 
     socket.on("new-message", handleNewMessage)
+    socket.on("pending-messages", handlePendingMessages)
+    socket.on("message-sent", handleMessageSent)
+    socket.on("messages-read", handleMessagesRead)
     socket.on("user-status-change", handleUserStatusChange)
 
     return () => {
       socket.off("new-message", handleNewMessage)
+      socket.off("pending-messages", handlePendingMessages)
+      socket.off("message-sent", handleMessageSent)
+      socket.off("messages-read", handleMessagesRead)
       socket.off("user-status-change", handleUserStatusChange)
     }
   }, [socket, activeConversation, user])
@@ -183,30 +318,34 @@ export default function ChatPage() {
     }
   }, [user, router, logout])
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!newMessage.trim() || !activeConversation || !socket || !user) return
+    if (!newMessage.trim() || !activeConversation || !user) return
 
-    // Emit message to socket server
-    socket.emit("send-message", {
+    // Create optimistic message
+    const localMessageId = `local-${Date.now()}`
+    const optimisticMessage: Message = {
+      id: `temp-${Date.now()}`,
+      localMessageId,
+      content: newMessage,
+      senderId: user.id,
+      senderName: user.name,
+      timestamp: new Date(),
+      status: "sending",
+    }
+
+    // Add to UI immediately
+    setMessages((prev) => [...prev, optimisticMessage])
+    setNewMessage("")
+
+    // Send via socket service (handles offline case)
+    await sendMessage({
       content: newMessage,
       conversationId: activeConversation.id,
       senderId: user.id,
       senderName: user.name,
     })
-
-    // Optimistically add message to UI
-    const optimisticMessage: Message = {
-      id: `temp-${Date.now()}`,
-      content: newMessage,
-      senderId: user.id,
-      senderName: user.name,
-      timestamp: new Date(),
-    }
-
-    setMessages([...messages, optimisticMessage])
-    setNewMessage("")
   }
 
   const handleCreateConversation = async () => {
@@ -280,6 +419,23 @@ export default function ChatPage() {
     return minutes <= 0 ? "Just now" : `${minutes}m ago`
   }
 
+  const getStatusIcon = (status?: MessageStatus) => {
+    switch (status) {
+      case "sending":
+        return <Clock className="h-3 w-3 text-blue-400" />
+      case "sent":
+        return <Check className="h-3 w-3 text-blue-400" />
+      case "delivered":
+        return <Check className="h-3 w-3 text-green-400" />
+      case "read":
+        return <CheckCheck className="h-3 w-3 text-green-400" />
+      case "error":
+        return <Clock className="h-3 w-3 text-red-400" />
+      default:
+        return null
+    }
+  }
+
   const handleLogout = async () => {
     try {
       await logout()
@@ -319,7 +475,7 @@ export default function ChatPage() {
               {isConnected ? (
                 <span className="text-xs text-green-400 bg-green-900/20 px-2 py-0.5 rounded-full">Connected</span>
               ) : (
-                <span className="text-xs text-red-400 bg-red-900/20 px-2 py-0.5 rounded-full">Disconnected</span>
+                <span className="text-xs text-yellow-400 bg-yellow-900/20 px-2 py-0.5 rounded-full">Offline</span>
               )}
             </div>
             <div className="flex items-center gap-3">
@@ -502,16 +658,19 @@ export default function ChatPage() {
                             )}
                             <span className="text-xs text-blue-400">{formatTime(message.timestamp)}</span>
                           </div>
-                          <Card
-                            className={cn(
-                              "mt-1",
-                              message.senderId === user.id
-                                ? "bg-blue-600 border-blue-700 text-white"
-                                : "bg-slate-800 border-blue-900/50 text-blue-100",
-                            )}
-                          >
-                            <CardContent className="p-3 text-sm">{message.content}</CardContent>
-                          </Card>
+                          <div className="flex items-end gap-1">
+                            <Card
+                              className={cn(
+                                "mt-1",
+                                message.senderId === user.id
+                                  ? "bg-blue-600 border-blue-700 text-white"
+                                  : "bg-slate-800 border-blue-900/50 text-blue-100",
+                              )}
+                            >
+                              <CardContent className="p-3 text-sm">{message.content}</CardContent>
+                            </Card>
+                            {message.senderId === user.id && getStatusIcon(message.status)}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -528,7 +687,7 @@ export default function ChatPage() {
               <div className="p-3 border-t border-blue-800/30 dark:border-blue-800/30 light:border-blue-200/50">
                 <form onSubmit={handleSendMessage} className="flex gap-2">
                   <Input
-                    placeholder="Type a message..."
+                    placeholder={isConnected ? "Type a message..." : "Type a message (will send when online)..."}
                     className="bg-slate-800/50 border-blue-800/30 text-white"
                     value={newMessage}
                     onChange={(e) => setNewMessage(e.target.value)}
@@ -536,7 +695,7 @@ export default function ChatPage() {
                   <Button
                     type="submit"
                     className="bg-blue-600 hover:bg-blue-700 text-white"
-                    disabled={!newMessage.trim() || !isConnected}
+                    disabled={!newMessage.trim()}
                   >
                     <Send className="h-4 w-4" />
                     <span className="sr-only">Send</span>
