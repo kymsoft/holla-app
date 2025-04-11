@@ -28,7 +28,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 })
     }
 
-    // Search users by name or email
+    // Search users by name or email, including the current user
     const users = await prisma.user.findMany({
       where: {
         OR: [
@@ -45,9 +45,6 @@ export async function GET(request: Request) {
             },
           },
         ],
-        id: {
-          not: session.user.id, // Exclude current user
-        },
       },
       select: {
         id: true,

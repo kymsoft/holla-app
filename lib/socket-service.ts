@@ -4,8 +4,8 @@ import { useToast } from "@/components/ui/use-toast";
 // Singleton pattern for socket connection
 let socket: Socket | null = null
 let reconnectAttempts = 0
-const MAX_RECONNECT_ATTEMPTS = 5
-const RECONNECT_INTERVAL = 3000 // 3 seconds
+const MAX_RECONNECT_ATTEMPTS = 10
+const RECONNECT_INTERVAL = 2000 // 2 seconds
 
 export const initializeSocket = async (userId: string): Promise<Socket> => {
   if (socket && socket.connected) {
@@ -13,14 +13,27 @@ export const initializeSocket = async (userId: string): Promise<Socket> => {
   }
   const { toast } = useToast()
 
-  // Initialize the socket connection
-  await fetch("/api/socket")
+  // Close any existing socket
+  if (socket) {
+    socket.close()
+  }
 
-  socket = io({
+  // Initialize the socket connection
+  try {
+    await fetch("/api/socket")
+  } catch (error) {
+    console.error("Error initializing socket endpoint:", error)
+  }
+
+  const socketUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000"
+
+  socket = io(socketUrl, {
     path: "/api/socket",
     reconnectionAttempts: MAX_RECONNECT_ATTEMPTS,
     reconnectionDelay: RECONNECT_INTERVAL,
     timeout: 10000,
+    transports: ["websocket", "polling"],
+    forceNew: true,
   })
 
   socket.on("connect", () => {
@@ -65,6 +78,22 @@ export const initializeSocket = async (userId: string): Promise<Socket> => {
       variant: "destructive",
     })
   })
+
+  // Set up a ping interval to keep the connection alive
+  const pingInterval = setInterval(() => {
+    if (socket && socket.connected) {
+      socket.emit("ping", () => {
+        console.log("Ping successful")
+      })
+    }
+  }, 30000) // Every 30 seconds
+
+  // Clean up ping interval on unmount
+  if (typeof window !== "undefined") {
+    window.addEventListener("beforeunload", () => {
+      clearInterval(pingInterval)
+    })
+  }
 
   return socket
 }

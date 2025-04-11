@@ -1,13 +1,14 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Search, X, UserPlus, Check } from "lucide-react"
+import { Search, X, UserPlus, Check, Loader2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { useToast } from "@/components/ui/use-toast";
 import { useRouter } from "next/navigation"
 import { formatDistanceToNow } from "date-fns"
+import { useAuth } from "@/app/auth-provider"
 
 type User = {
   id: string
@@ -28,6 +29,7 @@ export function UserSearch() {
   const searchRef = useRef<HTMLDivElement>(null)
   const { toast } = useToast()
   const router = useRouter()
+  const { user } = useAuth()
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -221,6 +223,11 @@ export function UserSearch() {
             onClick={handleCreateGroupChat}
             disabled={isCreatingConversation}
           >
+            {isCreatingConversation ? (
+              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+            ) : (
+              <UserPlus className="h-3 w-3 mr-1" />
+            )}
             Create Group
           </Button>
         </div>
@@ -230,34 +237,46 @@ export function UserSearch() {
       {isOpen && (query || results.length > 0) && (
         <div className="absolute z-10 mt-1 w-full bg-slate-900 border border-blue-800/30 rounded-md shadow-lg max-h-60 overflow-auto">
           {isLoading ? (
-            <div className="p-2 text-center text-blue-300">Searching...</div>
+            <div className="p-4 text-center text-blue-300">
+              <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+              Searching...
+            </div>
           ) : results.length > 0 ? (
             <ul>
-              {results.map((user) => (
+              {results.map((searchUser) => (
                 <li
-                  key={user.id}
+                  key={searchUser.id}
                   className="hover:bg-blue-900/30 cursor-pointer"
-                  onClick={() => handleSelectUser(user)}
+                  onClick={() => handleSelectUser(searchUser)}
                 >
                   <div className="flex items-center justify-between p-2">
                     <div className="flex items-center gap-2">
                       <Avatar className="h-8 w-8">
-                        {user.image ? (
-                          <AvatarImage src={user.image} alt={user.name} />
+                        {searchUser.image ? (
+                          <AvatarImage src={searchUser.image} alt={searchUser.name} />
                         ) : (
-                          <AvatarFallback className="bg-blue-700 text-white">{user.name[0]}</AvatarFallback>
+                          <AvatarFallback className="bg-blue-700 text-white">{searchUser.name[0]}</AvatarFallback>
                         )}
                       </Avatar>
                       <div>
-                        <div className="font-medium text-white">{user.name}</div>
-                        <div className="text-xs text-blue-300">{user.email}</div>
+                        <div className="font-medium text-white flex items-center gap-2">
+                          {searchUser.name}
+                          {searchUser.id === user?.id && (
+                            <span className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded">You</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-blue-300">{searchUser.email}</div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       <div className="text-xs text-blue-400">
-                        {user.isOnline ? <span className="text-green-400">Online</span> : formatLastSeen(user.lastSeen)}
+                        {searchUser.isOnline ? (
+                          <span className="text-green-400">Online</span>
+                        ) : (
+                          formatLastSeen(searchUser.lastSeen)
+                        )}
                       </div>
-                      {selectedUsers.some((selected) => selected.id === user.id) ? (
+                      {selectedUsers.some((selected) => selected.id === searchUser.id) ? (
                         <Check className="h-4 w-4 text-green-400" />
                       ) : (
                         <UserPlus className="h-4 w-4 text-blue-400" />
@@ -268,7 +287,7 @@ export function UserSearch() {
               ))}
             </ul>
           ) : query ? (
-            <div className="p-2 text-center text-blue-300">No users found</div>
+            <div className="p-4 text-center text-blue-300">No users found</div>
           ) : null}
         </div>
       )}

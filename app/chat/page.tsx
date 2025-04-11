@@ -27,6 +27,7 @@ import {
   Smile,
   Paperclip,
   Mic,
+  RefreshCw,
 } from "lucide-react"
 import { useAuth } from "@/app/auth-provider"
 import { useTheme } from "next-themes"
@@ -75,49 +76,53 @@ export default function ChatPage() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [pendingMessages, setPendingMessages] = useState<Record<string, Message[]>>({})
+  const [isReconnecting, setIsReconnecting] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const { user, logout } = useAuth()
   const { theme, setTheme } = useTheme()
   const router = useRouter()
   const searchParams = useSearchParams()
   const { toast } = useToast()
-  const { socket, isConnected } = useSocket()
+  const { socket, isConnected, reconnect } = useSocket()
 
   // Get conversation ID from URL if present
-  const conversationId = searchParams ? searchParams.get("conversationId") : null
+  const conversationId = searchParams?.get("conversationId") || null
 
   // Fetch conversations
-  useEffect(() => {
-    const fetchConversations = async () => {
-      if (!user) return
+  const fetchConversations = async () => {
+    if (!user) return
 
-      try {
-        const res = await fetch("/api/conversations")
-        if (res.ok) {
-          const data = await res.json()
-          setConversations(data.conversations)
-          setIsLoading(false)
+    try {
+      const res = await fetch("/api/conversations")
+      if (res.ok) {
+        const data = await res.json()
+        setConversations(data.conversations)
+        setIsLoading(false)
 
-          // If conversationId is in URL, set it as active
-          if (conversationId) {
-            const conversation = data.conversations.find((c: Conversation) => c.id === conversationId)
-            if (conversation) {
-              setActiveConversation(conversation)
-            }
+        // If conversationId is in URL, set it as active
+        if (conversationId) {
+          const conversation = data.conversations.find((c: Conversation) => c.id === conversationId)
+          if (conversation) {
+            setActiveConversation(conversation)
           }
         }
-      } catch (error) {
-        console.error("Error fetching conversations:", error)
-        toast({
-          title: "Error",
-          description: "Failed to load conversations",
-          variant: "destructive",
-        })
-        setIsLoading(false)
       }
+    } catch (error) {
+      console.error("Error fetching conversations:", error)
+      toast({
+        title: "Error",
+        description: "Failed to load conversations",
+        variant: "destructive",
+      })
+      setIsLoading(false)
     }
+  }
 
+  useEffect(() => {
     fetchConversations()
+    // Refresh conversations every 30 seconds
+    const intervalId = setInterval(fetchConversations, 30000)
+    return () => clearInterval(intervalId)
   }, [user, toast, conversationId])
 
   // Set first conversation as active by default if none is selected
@@ -128,75 +133,87 @@ export default function ChatPage() {
   }, [conversations, activeConversation, isLoading, conversationId])
 
   // Fetch messages for active conversation
-  useEffect(() => {
-    const fetchMessages = async () => {
-      if (!activeConversation) return
+  const fetchMessages = async () => {
+    if (!activeConversation) return
 
-      try {
-        const res = await fetch(`/api/messages?conversationId=${activeConversation.id}`)
-        if (res.ok) {
-          const data = await res.json()
-          setMessages(data.messages)
+    try {
+      const res = await fetch(`/api/messages?conversationId=${activeConversation.id}`)
+      if (res.ok) {
+        const data = await res.json()
+        setMessages(data.messages)
 
-          // Mark messages as read
-          if (socket && user) {
-            socket.emit("mark-messages-read", {
-              conversationId: activeConversation.id,
-              userId: user.id,
-            })
-          }
-
-          // Add any pending messages for this conversation
-          if (pendingMessages[activeConversation.id]) {
-            setMessages((prev) => [...prev, ...pendingMessages[activeConversation.id]])
-
-            // Clear pending messages for this conversation
-            setPendingMessages((prev) => {
-              const updated = { ...prev }
-              delete updated[activeConversation.id]
-              return updated
-            })
-          }
-
-          // Update URL with conversation ID
-          router.push(`/chat?conversationId=${activeConversation.id}`, { scroll: false })
+        // Mark messages as read
+        if (socket && user && socket.connected) {
+          socket.emit("mark-messages-read", {
+            conversationId: activeConversation.id,
+            userId: user.id,
+          })
         }
-      } catch (error) {
-        console.error("Error fetching messages:", error)
-        toast({
-          title: "Error",
-          description: "Failed to load messages",
-          variant: "destructive",
-        })
-      }
-    }
 
+        // Add any pending messages for this conversation
+        if (pendingMessages[activeConversation.id]) {
+          setMessages((prev) => [...prev, ...pendingMessages[activeConversation.id]])
+
+          // Clear pending messages for this conversation
+          setPendingMessages((prev) => {
+            const updated = { ...prev }
+            delete updated[activeConversation.id]
+            return updated
+          })
+        }
+
+        // Update URL with conversation ID
+        router.push(`/chat?conversationId=${activeConversation.id}`, { scroll: false })
+      }
+    } catch (error) {
+      console.error("Error fetching messages:", error)
+      toast({
+        title: "Error",
+        description: "Failed to load messages",
+        variant: "destructive",
+      })
+    }
+  }
+
+  useEffect(() => {
     fetchMessages()
 
     // Join the conversation room via socket
-    if (socket && activeConversation) {
+    if (socket && activeConversation && socket.connected) {
       socket.emit("join-conversation", activeConversation.id)
     }
 
+    // Refresh messages every 15 seconds
+    const intervalId = setInterval(fetchMessages, 15000)
+
     return () => {
+      clearInterval(intervalId)
       // Leave the conversation room when changing conversations
-      if (socket && activeConversation) {
+      if (socket && activeConversation && socket.connected) {
         socket.emit("leave-conversation", activeConversation.id)
       }
     }
-  }, [activeConversation, socket, toast, user, pendingMessages, router])
+  }, [activeConversation, socket, isConnected])
 
   // Listen for socket events
   useEffect(() => {
     if (!socket) return
 
     const handleNewMessage = (message: Message) => {
+      console.log("New message received:", message)
+
       // If this is for the active conversation, add it to messages
-      if (activeConversation && message.id.includes(activeConversation.id)) {
-        setMessages((prev) => [...prev, message])
+      if (activeConversation && activeConversation.id === message.id.split("-")[0]) {
+        setMessages((prev) => {
+          // Check if message already exists to avoid duplicates
+          if (prev.some((m) => m.id === message.id)) {
+            return prev
+          }
+          return [...prev, message]
+        })
 
         // Mark as read if it's not from the current user
-        if (message.senderId !== user?.id && socket) {
+        if (message.senderId !== user?.id && socket && socket.connected) {
           socket.emit("mark-messages-read", {
             conversationId: activeConversation.id,
             userId: user?.id,
@@ -204,11 +221,16 @@ export default function ChatPage() {
         }
       } else {
         // Store as pending for other conversations
+        const conversationId = message.id.split("-")[0]
         setPendingMessages((prev) => {
-          const conversationId = message.id.split("-")[0]
+          const existing = prev[conversationId] || []
+          // Check if message already exists
+          if (existing.some((m) => m.id === message.id)) {
+            return prev
+          }
           return {
             ...prev,
-            [conversationId]: [...(prev[conversationId] || []), message],
+            [conversationId]: [...existing, message],
           }
         })
 
@@ -216,14 +238,14 @@ export default function ChatPage() {
         if (message.senderId !== user?.id) {
           setConversations((prev) =>
             prev.map((conv) => {
-              if (conv.id === message.id.split("-")[0]) {
+              if (conv.id === conversationId) {
                 return {
                   ...conv,
                   unread: conv.unread + 1,
                   lastMessage: {
                     content: message.content,
                     sender: message.senderName,
-                    timestamp: message.timestamp,
+                    timestamp: new Date(message.timestamp),
                     isOwnMessage: false,
                   },
                   updatedAt: new Date(),
@@ -240,12 +262,20 @@ export default function ChatPage() {
       conversationId,
       messages: undeliveredMsgs,
     }: { conversationId: string; messages: Message[] }) => {
+      console.log("Undelivered messages received for conversation:", conversationId, undeliveredMsgs)
+
       // If this is for the active conversation, add them to messages
       if (activeConversation && activeConversation.id === conversationId) {
-        setMessages((prev) => [...prev, ...undeliveredMsgs])
+        setMessages((prev) => {
+          // Filter out duplicates
+          const newMessages = undeliveredMsgs.filter(
+            (newMsg) => !prev.some((existingMsg) => existingMsg.id === newMsg.id),
+          )
+          return [...prev, ...newMessages]
+        })
 
         // Mark as read
-        if (socket && user) {
+        if (socket && user && socket.connected) {
           socket.emit("mark-messages-read", {
             conversationId,
             userId: user.id,
@@ -253,10 +283,17 @@ export default function ChatPage() {
         }
       } else {
         // Store as pending for other conversations
-        setPendingMessages((prev) => ({
-          ...prev,
-          [conversationId]: [...(prev[conversationId] || []), ...undeliveredMsgs],
-        }))
+        setPendingMessages((prev) => {
+          const existing = prev[conversationId] || []
+          // Filter out duplicates
+          const newMessages = undeliveredMsgs.filter(
+            (newMsg) => !existing.some((existingMsg) => existingMsg.id === newMsg.id),
+          )
+          return {
+            ...prev,
+            [conversationId]: [...existing, ...newMessages],
+          }
+        })
 
         // Update unread count for the conversation
         setConversations((prev) =>
@@ -269,7 +306,7 @@ export default function ChatPage() {
                 lastMessage: {
                   content: lastMsg.content,
                   sender: lastMsg.senderName,
-                  timestamp: lastMsg.timestamp,
+                  timestamp: new Date(lastMsg.timestamp),
                   isOwnMessage: false,
                 },
                 updatedAt: new Date(),
@@ -282,6 +319,8 @@ export default function ChatPage() {
     }
 
     const handleMessageSent = ({ localMessageId, messageId }: { localMessageId: string; messageId: string }) => {
+      console.log("Message sent confirmation received:", localMessageId, messageId)
+
       // Update message status from sending to sent
       setMessages((prev) =>
         prev.map((msg) => {
@@ -298,6 +337,8 @@ export default function ChatPage() {
       readBy,
       conversationId,
     }: { messageIds: string[]; readBy: string; conversationId: string }) => {
+      console.log("Messages read notification received:", messageIds, readBy, conversationId)
+
       // Update message status to read
       if (activeConversation && activeConversation.id === conversationId) {
         setMessages((prev) =>
@@ -312,6 +353,8 @@ export default function ChatPage() {
     }
 
     const handleMessagesDelivered = ({ messageIds, deliveredTo }: { messageIds: string[]; deliveredTo: string }) => {
+      console.log("Messages delivered notification received:", messageIds, deliveredTo)
+
       // Update message status to delivered
       setMessages((prev) =>
         prev.map((msg) => {
@@ -324,11 +367,14 @@ export default function ChatPage() {
     }
 
     const handleUserStatusChange = ({ userId, isOnline }: { userId: string; isOnline: boolean }) => {
+      console.log("User status change notification received:", userId, isOnline)
+
       // Update user online status in conversations
       setConversations((prev) =>
         prev.map((conv) => {
           // For non-group chats, check if this is the other user
           if (!conv.isGroup) {
+            // Check if this user is part of the conversation
             const isUserInConversation = conv.id.includes(userId)
             if (isUserInConversation) {
               return { ...conv, online: isOnline }
@@ -339,12 +385,33 @@ export default function ChatPage() {
       )
     }
 
+    const handleMessageError = ({ error, localMessageId }: { error: string; localMessageId: string }) => {
+      console.error("Message error received:", error, localMessageId)
+
+      // Update message status to error
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.localMessageId === localMessageId) {
+            return { ...msg, status: "error" as MessageStatus }
+          }
+          return msg
+        }),
+      )
+
+      toast({
+        title: "Message Error",
+        description: error,
+        variant: "destructive",
+      })
+    }
+
     socket.on("new-message", handleNewMessage)
     socket.on("undelivered-messages", handleUndeliveredMessages)
     socket.on("message-sent", handleMessageSent)
     socket.on("messages-read", handleMessagesRead)
     socket.on("messages-delivered", handleMessagesDelivered)
     socket.on("user-status-change", handleUserStatusChange)
+    socket.on("message-error", handleMessageError)
 
     return () => {
       socket.off("new-message", handleNewMessage)
@@ -353,8 +420,9 @@ export default function ChatPage() {
       socket.off("messages-read", handleMessagesRead)
       socket.off("messages-delivered", handleMessagesDelivered)
       socket.off("user-status-change", handleUserStatusChange)
+      socket.off("message-error", handleMessageError)
     }
-  }, [socket, activeConversation, user])
+  }, [socket, activeConversation, user, toast])
 
   // Scroll to bottom of messages
   useEffect(() => {
@@ -417,6 +485,32 @@ export default function ChatPage() {
       senderId: user.id,
       senderName: user.name,
     })
+  }
+
+  const handleReconnect = async () => {
+    setIsReconnecting(true)
+    try {
+      await reconnect()
+      toast({
+        title: "Reconnecting",
+        description: "Attempting to reconnect to the chat server...",
+      })
+
+      // Refresh data after reconnection
+      await fetchConversations()
+      if (activeConversation) {
+        await fetchMessages()
+      }
+    } catch (error) {
+      console.error("Reconnection error:", error)
+      toast({
+        title: "Reconnection Failed",
+        description: "Please try again or refresh the page.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsReconnecting(false)
+    }
   }
 
   const formatTime = (date: Date) => {
@@ -490,7 +584,7 @@ export default function ChatPage() {
   const groupedMessages: { date: string; messages: Message[] }[] = []
 
   messages.forEach((message) => {
-    const messageDate = formatMessageDate(message.timestamp)
+    const messageDate = formatMessageDate(new Date(message.timestamp))
     const lastGroup = groupedMessages[groupedMessages.length - 1]
 
     if (lastGroup && lastGroup.date === messageDate) {
@@ -522,7 +616,19 @@ export default function ChatPage() {
               {isConnected ? (
                 <span className="text-xs text-green-400 bg-green-900/20 px-2 py-0.5 rounded-full">Connected</span>
               ) : (
-                <span className="text-xs text-yellow-400 bg-yellow-900/20 px-2 py-0.5 rounded-full">Offline</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-yellow-400 bg-yellow-900/20 px-2 py-0.5 rounded-full">Offline</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs border-yellow-500 text-yellow-400 hover:bg-yellow-900/20"
+                    onClick={handleReconnect}
+                    disabled={isReconnecting}
+                  >
+                    <RefreshCw className={`h-3 w-3 mr-1 ${isReconnecting ? "animate-spin" : ""}`} />
+                    Reconnect
+                  </Button>
+                </div>
               )}
             </div>
             <div className="flex items-center gap-3">
@@ -755,7 +861,9 @@ export default function ChatPage() {
                                   </Card>
                                   {message.isOwnMessage && getStatusIcon(message.status)}
                                 </div>
-                                <div className="text-xs text-blue-400 mt-1 ml-1">{formatTime(message.timestamp)}</div>
+                                <div className="text-xs text-blue-400 mt-1 ml-1">
+                                  {formatTime(new Date(message.timestamp))}
+                                </div>
                               </div>
                             </div>
                           </div>
