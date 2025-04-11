@@ -19,7 +19,7 @@ const ioHandler = async (req: NextApiRequest, res: NextApiResponseServerIO) => {
       pingTimeout: 60000, // Increase ping timeout to 60 seconds
       pingInterval: 25000, // Ping every 25 seconds
       cors: {
-        origin: process.env.NEXT_PUBLIC_APP_URL || "*",
+        origin: "*", // Allow all origins in development
         methods: ["GET", "POST"],
       },
     })
@@ -84,33 +84,22 @@ const ioHandler = async (req: NextApiRequest, res: NextApiResponseServerIO) => {
             select: { id: true },
           })
 
-          // Mark message as delivered for online users
-          if (onlineParticipants.length > 0) {
-            await prisma.messageDelivery.createMany({
-              data: onlineParticipants.map((user) => ({
-                messageId: message.id,
-                userId: user.id,
-                status: user.id === senderId ? "sent" : "delivered",
-              })),
-              skipDuplicates: true,
-            })
-          }
+          // Create message status entries for all participants
+          await Promise.all(
+            participants.map(async (participant) => {
+              const isOnline = onlineParticipants.some((op) => op.id === participant.userId)
+              const isSender = participant.userId === senderId
 
-          // For offline users, create pending deliveries
-          const offlineParticipantIds = participants
-            .map((p) => p.userId)
-            .filter((id) => !onlineParticipants.some((op) => op.id === id) && id !== senderId)
-
-          if (offlineParticipantIds.length > 0) {
-            await prisma.messageDelivery.createMany({
-              data: offlineParticipantIds.map((userId) => ({
-                messageId: message.id,
-                userId,
-                status: "pending",
-              })),
-              skipDuplicates: true,
-            })
-          }
+              await prisma.messageStatus.create({
+                data: {
+                  messageId: message.id,
+                  userId: participant.userId,
+                  status: isSender ? "sent" : isOnline ? "delivered" : "sent",
+                  deliveredAt: isOnline && !isSender ? new Date() : null,
+                },
+              })
+            }),
+          )
 
           // Broadcast message to all users in the conversation
           io.to(conversationId).emit("new-message", {
@@ -147,11 +136,16 @@ const ioHandler = async (req: NextApiRequest, res: NextApiResponseServerIO) => {
           // Broadcast user online status
           socket.broadcast.emit("user-status-change", { userId, isOnline: true })
 
-          // Deliver pending messages to this user
-          const pendingDeliveries = await prisma.messageDelivery.findMany({
+          // Find undelivered messages for this user
+          const undeliveredMessages = await prisma.messageStatus.findMany({
             where: {
               userId,
-              status: "pending",
+              status: "sent",
+              message: {
+                senderId: {
+                  not: userId, // Don't include messages sent by this user
+                },
+              },
             },
             include: {
               message: {
@@ -169,11 +163,11 @@ const ioHandler = async (req: NextApiRequest, res: NextApiResponseServerIO) => {
             },
           })
 
-          // Update delivery status to delivered
-          if (pendingDeliveries.length > 0) {
-            await prisma.messageDelivery.updateMany({
+          // Update status to delivered
+          if (undeliveredMessages.length > 0) {
+            await prisma.messageStatus.updateMany({
               where: {
-                id: { in: pendingDeliveries.map((d) => d.id) },
+                id: { in: undeliveredMessages.map((m) => m.id) },
               },
               data: {
                 status: "delivered",
@@ -181,32 +175,52 @@ const ioHandler = async (req: NextApiRequest, res: NextApiResponseServerIO) => {
               },
             })
 
-            // Send pending messages to the user
+            // Group messages by conversation
             const messagesByConversation: Record<string, any[]> = {}
 
-            pendingDeliveries.forEach((delivery) => {
-              const conversationId = delivery.message.conversationId
+            undeliveredMessages.forEach((status) => {
+              const conversationId = status.message.conversationId
               if (!messagesByConversation[conversationId]) {
                 messagesByConversation[conversationId] = []
               }
 
               messagesByConversation[conversationId].push({
-                id: delivery.message.id,
-                content: delivery.message.content,
-                senderId: delivery.message.senderId,
-                senderName: delivery.message.sender.name,
-                senderImage: delivery.message.sender.image,
-                timestamp: delivery.message.createdAt,
+                id: status.message.id,
+                content: status.message.content,
+                senderId: status.message.senderId,
+                senderName: status.message.sender.name,
+                senderImage: status.message.sender.image,
+                timestamp: status.message.createdAt,
                 status: "delivered",
               })
             })
 
-            // Send pending messages for each conversation
+            // Send undelivered messages for each conversation
             Object.entries(messagesByConversation).forEach(([conversationId, messages]) => {
-              socket.emit("pending-messages", {
+              socket.emit("undelivered-messages", {
                 conversationId,
                 messages,
               })
+            })
+
+            // Notify senders that their messages were delivered
+            const senderIds = [...new Set(undeliveredMessages.map((status) => status.message.senderId))]
+
+            senderIds.forEach((senderId) => {
+              const messageIds = undeliveredMessages
+                .filter((status) => status.message.senderId === senderId)
+                .map((status) => status.message.id)
+
+              const senderSocket = io.sockets.sockets.get(
+                Array.from(io.sockets.sockets.values()).find((s) => s.data && s.data.userId === senderId)?.id || "",
+              )
+
+              if (senderSocket) {
+                senderSocket.emit("messages-delivered", {
+                  messageIds,
+                  deliveredTo: userId,
+                })
+              }
             })
           }
         } catch (error) {
@@ -220,21 +234,30 @@ const ioHandler = async (req: NextApiRequest, res: NextApiResponseServerIO) => {
           const { conversationId, userId } = data
 
           // Find unread messages in this conversation for this user
-          const unreadDeliveries = await prisma.messageDelivery.findMany({
+          const unreadMessages = await prisma.messageStatus.findMany({
             where: {
               userId,
-              status: { in: ["delivered", "pending"] },
+              status: { in: ["sent", "delivered"] },
               message: {
                 conversationId,
+                senderId: { not: userId }, // Only mark others' messages as read
+              },
+            },
+            include: {
+              message: {
+                select: {
+                  id: true,
+                  senderId: true,
+                },
               },
             },
           })
 
           // Update to read status
-          if (unreadDeliveries.length > 0) {
-            await prisma.messageDelivery.updateMany({
+          if (unreadMessages.length > 0) {
+            await prisma.messageStatus.updateMany({
               where: {
-                id: { in: unreadDeliveries.map((d) => d.id) },
+                id: { in: unreadMessages.map((m) => m.id) },
               },
               data: {
                 status: "read",
@@ -242,41 +265,38 @@ const ioHandler = async (req: NextApiRequest, res: NextApiResponseServerIO) => {
               },
             })
 
-            // Notify senders that their messages were read
-            const messageIds = unreadDeliveries.map((d) => d.messageId)
-
-            const messages = await prisma.message.findMany({
-              where: {
-                id: { in: messageIds },
-              },
-              select: {
-                id: true,
-                senderId: true,
-              },
-            })
-
             // Group by sender
             const messagesBySender: Record<string, string[]> = {}
-            messages.forEach((msg) => {
-              if (!messagesBySender[msg.senderId]) {
-                messagesBySender[msg.senderId] = []
+            unreadMessages.forEach((status) => {
+              const senderId = status.message.senderId
+              if (!messagesBySender[senderId]) {
+                messagesBySender[senderId] = []
               }
-              messagesBySender[msg.senderId].push(msg.id)
+              messagesBySender[senderId].push(status.message.id)
             })
 
             // Notify each sender
-            Object.entries(messagesBySender).forEach(([senderId, msgIds]) => {
-              io.to(senderId).emit("messages-read", {
-                messageIds: msgIds,
-                readBy: userId,
-                conversationId,
-              })
+            Object.entries(messagesBySender).forEach(([senderId, messageIds]) => {
+              const senderSocket = Array.from(io.sockets.sockets.values()).find(
+                (s) => s.data && s.data.userId === senderId,
+              )
+
+              if (senderSocket) {
+                senderSocket.emit("messages-read", {
+                  messageIds,
+                  readBy: userId,
+                  conversationId,
+                })
+              }
             })
           }
         } catch (error) {
           console.error("Error marking messages as read:", error)
         }
       })
+
+      // Store user ID with socket for later reference
+      socket.data = { userId: null }
 
       // Handle disconnection
       socket.on("disconnect", async () => {

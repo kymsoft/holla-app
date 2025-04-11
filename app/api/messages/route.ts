@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
-import { PrismaClient } from "@prisma/client"
-
-const prisma = new PrismaClient()
+import prisma from "@/lib/prisma"
 
 export async function GET(request: Request) {
   try {
@@ -13,8 +11,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ message: "Conversation ID is required" }, { status: 400 })
     }
 
-    const sessionCookies = await cookies()
-    const sessionId = sessionCookies.get("session_id")?.value
+    const sessionId = (await cookies()).get("session_id")?.value
 
     if (!sessionId) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 })
@@ -27,10 +24,11 @@ export async function GET(request: Request) {
     })
 
     if (!session || session.expires < new Date()) {
-      const sessionCookies = await cookies()
-      sessionCookies.delete("session_id")
+      (await cookies()).delete("session_id")
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 })
     }
+
+    const currentUserId = session.user.id
 
     // Check if user is part of the conversation
     const conversation = await prisma.conversation.findFirst({
@@ -38,7 +36,7 @@ export async function GET(request: Request) {
         id: conversationId,
         participants: {
           some: {
-            userId: session.user.id,
+            userId: currentUserId,
           },
         },
       },
@@ -61,13 +59,50 @@ export async function GET(request: Request) {
             image: true,
           },
         },
+        status: {
+          where: {
+            userId: currentUserId,
+          },
+        },
       },
       orderBy: {
         createdAt: "asc",
       },
     })
 
-    return NextResponse.json({ messages })
+    // Format messages
+    const formattedMessages = messages.map((message) => {
+      const status = message.status[0]?.status || "sent"
+
+      return {
+        id: message.id,
+        content: message.content,
+        senderId: message.senderId,
+        senderName: message.sender.name,
+        senderImage: message.sender.image,
+        timestamp: message.createdAt,
+        status,
+        isOwnMessage: message.senderId === currentUserId,
+      }
+    })
+
+    // Mark messages as read
+    await prisma.messageStatus.updateMany({
+      where: {
+        userId: currentUserId,
+        status: { in: ["sent", "delivered"] },
+        message: {
+          conversationId,
+          senderId: { not: currentUserId },
+        },
+      },
+      data: {
+        status: "read",
+        readAt: new Date(),
+      },
+    })
+
+    return NextResponse.json({ messages: formattedMessages })
   } catch (error) {
     console.error("Get messages error:", error)
     return NextResponse.json({ message: "Internal server error" }, { status: 500 })

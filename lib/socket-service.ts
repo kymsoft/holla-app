@@ -139,7 +139,7 @@ const storeOfflineMessage = (message: any, localMessageId: string) => {
 
 // Send stored offline messages when back online
 export const sendOfflineMessages = () => {
-    const { toast } = useToast()
+  const { toast } = useToast()
   if (!socket?.connected) return
 
   const offlineMessages = JSON.parse(localStorage.getItem("offlineMessages") || "[]")

@@ -3,14 +3,13 @@
 import type React from "react"
 
 import { useState, useEffect, useRef } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   MessageCircle,
-  Search,
   Settings,
   LogOut,
   Send,
@@ -21,6 +20,13 @@ import {
   Check,
   CheckCheck,
   Clock,
+  Info,
+  Phone,
+  Video,
+  ImageIcon,
+  Smile,
+  Paperclip,
+  Mic,
 } from "lucide-react"
 import { useAuth } from "@/app/auth-provider"
 import { useTheme } from "next-themes"
@@ -28,6 +34,8 @@ import { cn } from "@/lib/utils"
 import { useToast } from "@/components/ui/use-toast";
 import { useSocket } from "@/hooks/use-socket"
 import { sendMessage } from "@/lib/socket-service"
+import { UserSearch } from "@/components/user-search"
+import { format, formatDistanceToNow, isToday, isYesterday } from "date-fns"
 
 type MessageStatus = "sending" | "sent" | "delivered" | "read" | "error"
 
@@ -40,17 +48,23 @@ type Message = {
   senderImage?: string
   timestamp: Date
   status?: MessageStatus
+  isOwnMessage?: boolean
 }
 
 type Conversation = {
   id: string
   name: string
   image?: string
-  lastMessage?: string
-  lastMessageTime?: Date
+  lastMessage?: {
+    content: string
+    sender: string
+    timestamp: Date
+    isOwnMessage: boolean
+  }
   unread: number
   online: boolean
   isGroup: boolean
+  updatedAt: Date
 }
 
 export default function ChatPage() {
@@ -58,7 +72,6 @@ export default function ChatPage() {
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [newMessage, setNewMessage] = useState("")
-  const [searchQuery, setSearchQuery] = useState("")
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [pendingMessages, setPendingMessages] = useState<Record<string, Message[]>>({})
@@ -66,13 +79,12 @@ export default function ChatPage() {
   const { user, logout } = useAuth()
   const { theme, setTheme } = useTheme()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { toast } = useToast()
   const { socket, isConnected } = useSocket()
 
-  // Filter conversations based on search query
-  const filteredConversations = conversations.filter((conversation) =>
-    conversation.name.toLowerCase().includes(searchQuery.toLowerCase()),
-  )
+  // Get conversation ID from URL if present
+  const conversationId = searchParams ? searchParams.get("conversationId") : null
 
   // Fetch conversations
   useEffect(() => {
@@ -85,6 +97,14 @@ export default function ChatPage() {
           const data = await res.json()
           setConversations(data.conversations)
           setIsLoading(false)
+
+          // If conversationId is in URL, set it as active
+          if (conversationId) {
+            const conversation = data.conversations.find((c: Conversation) => c.id === conversationId)
+            if (conversation) {
+              setActiveConversation(conversation)
+            }
+          }
         }
       } catch (error) {
         console.error("Error fetching conversations:", error)
@@ -98,14 +118,14 @@ export default function ChatPage() {
     }
 
     fetchConversations()
-  }, [user, toast])
+  }, [user, toast, conversationId])
 
-  // Set first conversation as active by default
+  // Set first conversation as active by default if none is selected
   useEffect(() => {
-    if (filteredConversations.length > 0 && !activeConversation && !isLoading) {
-      setActiveConversation(filteredConversations[0])
+    if (conversations.length > 0 && !activeConversation && !isLoading && !conversationId) {
+      setActiveConversation(conversations[0])
     }
-  }, [filteredConversations, activeConversation, isLoading])
+  }, [conversations, activeConversation, isLoading, conversationId])
 
   // Fetch messages for active conversation
   useEffect(() => {
@@ -137,6 +157,9 @@ export default function ChatPage() {
               return updated
             })
           }
+
+          // Update URL with conversation ID
+          router.push(`/chat?conversationId=${activeConversation.id}`, { scroll: false })
         }
       } catch (error) {
         console.error("Error fetching messages:", error)
@@ -161,7 +184,7 @@ export default function ChatPage() {
         socket.emit("leave-conversation", activeConversation.id)
       }
     }
-  }, [activeConversation, socket, toast, user, pendingMessages])
+  }, [activeConversation, socket, toast, user, pendingMessages, router])
 
   // Listen for socket events
   useEffect(() => {
@@ -197,8 +220,13 @@ export default function ChatPage() {
                 return {
                   ...conv,
                   unread: conv.unread + 1,
-                  lastMessage: message.content,
-                  lastMessageTime: message.timestamp,
+                  lastMessage: {
+                    content: message.content,
+                    sender: message.senderName,
+                    timestamp: message.timestamp,
+                    isOwnMessage: false,
+                  },
+                  updatedAt: new Date(),
                 }
               }
               return conv
@@ -208,13 +236,13 @@ export default function ChatPage() {
       }
     }
 
-    const handlePendingMessages = ({
+    const handleUndeliveredMessages = ({
       conversationId,
-      messages: pendingMsgs,
+      messages: undeliveredMsgs,
     }: { conversationId: string; messages: Message[] }) => {
       // If this is for the active conversation, add them to messages
       if (activeConversation && activeConversation.id === conversationId) {
-        setMessages((prev) => [...prev, ...pendingMsgs])
+        setMessages((prev) => [...prev, ...undeliveredMsgs])
 
         // Mark as read
         if (socket && user) {
@@ -227,19 +255,24 @@ export default function ChatPage() {
         // Store as pending for other conversations
         setPendingMessages((prev) => ({
           ...prev,
-          [conversationId]: [...(prev[conversationId] || []), ...pendingMsgs],
+          [conversationId]: [...(prev[conversationId] || []), ...undeliveredMsgs],
         }))
 
         // Update unread count for the conversation
         setConversations((prev) =>
           prev.map((conv) => {
             if (conv.id === conversationId) {
-              const lastMsg = pendingMsgs[pendingMsgs.length - 1]
+              const lastMsg = undeliveredMsgs[undeliveredMsgs.length - 1]
               return {
                 ...conv,
-                unread: conv.unread + pendingMsgs.length,
-                lastMessage: lastMsg.content,
-                lastMessageTime: lastMsg.timestamp,
+                unread: conv.unread + undeliveredMsgs.length,
+                lastMessage: {
+                  content: lastMsg.content,
+                  sender: lastMsg.senderName,
+                  timestamp: lastMsg.timestamp,
+                  isOwnMessage: false,
+                },
+                updatedAt: new Date(),
               }
             }
             return conv
@@ -278,13 +311,28 @@ export default function ChatPage() {
       }
     }
 
+    const handleMessagesDelivered = ({ messageIds, deliveredTo }: { messageIds: string[]; deliveredTo: string }) => {
+      // Update message status to delivered
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (messageIds.includes(msg.id) && msg.status === "sent") {
+            return { ...msg, status: "delivered" as MessageStatus }
+          }
+          return msg
+        }),
+      )
+    }
+
     const handleUserStatusChange = ({ userId, isOnline }: { userId: string; isOnline: boolean }) => {
       // Update user online status in conversations
       setConversations((prev) =>
         prev.map((conv) => {
           // For non-group chats, check if this is the other user
-          if (!conv.isGroup && conv.id.includes(userId)) {
-            return { ...conv, online: isOnline }
+          if (!conv.isGroup) {
+            const isUserInConversation = conv.id.includes(userId)
+            if (isUserInConversation) {
+              return { ...conv, online: isOnline }
+            }
           }
           return conv
         }),
@@ -292,16 +340,18 @@ export default function ChatPage() {
     }
 
     socket.on("new-message", handleNewMessage)
-    socket.on("pending-messages", handlePendingMessages)
+    socket.on("undelivered-messages", handleUndeliveredMessages)
     socket.on("message-sent", handleMessageSent)
     socket.on("messages-read", handleMessagesRead)
+    socket.on("messages-delivered", handleMessagesDelivered)
     socket.on("user-status-change", handleUserStatusChange)
 
     return () => {
       socket.off("new-message", handleNewMessage)
-      socket.off("pending-messages", handlePendingMessages)
+      socket.off("undelivered-messages", handleUndeliveredMessages)
       socket.off("message-sent", handleMessageSent)
       socket.off("messages-read", handleMessagesRead)
+      socket.off("messages-delivered", handleMessagesDelivered)
       socket.off("user-status-change", handleUserStatusChange)
     }
   }, [socket, activeConversation, user])
@@ -333,10 +383,31 @@ export default function ChatPage() {
       senderName: user.name,
       timestamp: new Date(),
       status: "sending",
+      isOwnMessage: true,
     }
 
     // Add to UI immediately
     setMessages((prev) => [...prev, optimisticMessage])
+
+    // Update conversation list with new message
+    setConversations((prev) =>
+      prev.map((conv) => {
+        if (conv.id === activeConversation.id) {
+          return {
+            ...conv,
+            lastMessage: {
+              content: newMessage,
+              sender: user.name,
+              timestamp: new Date(),
+              isOwnMessage: true,
+            },
+            updatedAt: new Date(),
+          }
+        }
+        return conv
+      }),
+    )
+
     setNewMessage("")
 
     // Send via socket service (handles offline case)
@@ -348,75 +419,34 @@ export default function ChatPage() {
     })
   }
 
-  const handleCreateConversation = async () => {
-    try {
-      const res = await fetch("/api/users")
-      if (res.ok) {
-        const data = await res.json()
-        // Show user selection UI here
-        // For simplicity, we'll just create a conversation with the first user
-        if (data.users.length > 0) {
-          const otherUser = data.users[0]
-
-          const createRes = await fetch("/api/conversations/create", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              userId: otherUser.id,
-              isGroup: false,
-            }),
-          })
-
-          if (createRes.ok) {
-            const newConversation = await createRes.json()
-            setConversations([...conversations, newConversation.conversation])
-            setActiveConversation(newConversation.conversation)
-            toast({
-              title: "Conversation created",
-              description: `Started a conversation with ${otherUser.name}`,
-            })
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Error creating conversation:", error)
-      toast({
-        title: "Error",
-        description: "Failed to create conversation",
-        variant: "destructive",
-      })
-    }
+  const formatTime = (date: Date) => {
+    return format(new Date(date), "h:mm a")
   }
 
-  const formatTime = (date: Date) => {
-    return new Intl.DateTimeFormat("en-US", {
-      hour: "numeric",
-      minute: "numeric",
-      hour12: true,
-    }).format(new Date(date))
+  const formatMessageDate = (date: Date) => {
+    const messageDate = new Date(date)
+
+    if (isToday(messageDate)) {
+      return "Today"
+    } else if (isYesterday(messageDate)) {
+      return "Yesterday"
+    } else {
+      return format(messageDate, "MMMM d, yyyy")
+    }
   }
 
   const formatLastMessageTime = (date?: Date) => {
     if (!date) return ""
 
-    const now = new Date()
     const messageDate = new Date(date)
-    const diff = now.getTime() - messageDate.getTime()
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24))
 
-    if (days > 0) {
-      return days === 1 ? "Yesterday" : `${days} days ago`
+    if (isToday(messageDate)) {
+      return format(messageDate, "h:mm a")
+    } else if (isYesterday(messageDate)) {
+      return "Yesterday"
+    } else {
+      return formatDistanceToNow(messageDate, { addSuffix: true })
     }
-
-    const hours = Math.floor(diff / (1000 * 60 * 60))
-    if (hours > 0) {
-      return `${hours}h ago`
-    }
-
-    const minutes = Math.floor(diff / (1000 * 60))
-    return minutes <= 0 ? "Just now" : `${minutes}m ago`
   }
 
   const getStatusIcon = (status?: MessageStatus) => {
@@ -455,6 +485,23 @@ export default function ChatPage() {
   const toggleTheme = () => {
     setTheme(theme === "dark" ? "light" : "dark")
   }
+
+  // Group messages by date
+  const groupedMessages: { date: string; messages: Message[] }[] = []
+
+  messages.forEach((message) => {
+    const messageDate = formatMessageDate(message.timestamp)
+    const lastGroup = groupedMessages[groupedMessages.length - 1]
+
+    if (lastGroup && lastGroup.date === messageDate) {
+      lastGroup.messages.push(message)
+    } else {
+      groupedMessages.push({
+        date: messageDate,
+        messages: [message],
+      })
+    }
+  })
 
   if (!user) {
     return (
@@ -531,25 +578,17 @@ export default function ChatPage() {
             "md:relative md:translate-x-0 transition-transform duration-200 ease-in-out",
             isMobileMenuOpen
               ? "absolute inset-y-0 left-0 translate-x-0 z-20 bg-slate-950/95 backdrop-blur-sm"
-              : "-translate-x-full",
+              : "-translate-x-full md:translate-x-0",
           )}
         >
           <div className="p-3 border-b border-blue-800/30 dark:border-blue-800/30 light:border-blue-200/50">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-blue-400" />
-              <Input
-                placeholder="Search conversations..."
-                className="pl-9 bg-slate-800/50 border-blue-800/30 text-white"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
+            <UserSearch />
           </div>
           <div className="flex-1 overflow-y-auto">
             {isLoading ? (
               <div className="p-4 text-center text-blue-300">Loading conversations...</div>
-            ) : filteredConversations.length > 0 ? (
-              filteredConversations.map((conversation) => (
+            ) : conversations.length > 0 ? (
+              conversations.map((conversation) => (
                 <div
                   key={conversation.id}
                   className={cn(
@@ -579,11 +618,20 @@ export default function ChatPage() {
                     <div className="flex justify-between items-baseline">
                       <h3 className="font-medium text-white truncate">{conversation.name}</h3>
                       <span className="text-xs text-blue-400">
-                        {formatLastMessageTime(conversation.lastMessageTime)}
+                        {conversation.lastMessage ? formatLastMessageTime(conversation.lastMessage.timestamp) : ""}
                       </span>
                     </div>
                     <div className="flex justify-between items-center">
-                      <p className="text-sm text-blue-300 truncate">{conversation.lastMessage || "No messages yet"}</p>
+                      <p className="text-sm text-blue-300 truncate">
+                        {conversation.lastMessage ? (
+                          <>
+                            {conversation.lastMessage.isOwnMessage ? "You: " : ""}
+                            {conversation.lastMessage.content}
+                          </>
+                        ) : (
+                          "No messages yet"
+                        )}
+                      </p>
                       {conversation.unread > 0 && (
                         <span className="bg-blue-600 text-white text-xs rounded-full h-5 min-w-5 flex items-center justify-center px-1">
                           {conversation.unread}
@@ -594,11 +642,11 @@ export default function ChatPage() {
                 </div>
               ))
             ) : (
-              <div className="p-4 text-center text-blue-300">No conversations found</div>
+              <div className="p-4 text-center text-blue-300">No conversations yet</div>
             )}
           </div>
           <div className="p-3 border-t border-blue-800/30">
-            <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white" onClick={handleCreateConversation}>
+            <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white">
               <PlusCircle className="h-4 w-4 mr-2" />
               New Conversation
             </Button>
@@ -610,74 +658,117 @@ export default function ChatPage() {
           {activeConversation ? (
             <>
               {/* Chat header */}
-              <div className="p-3 border-b border-blue-800/30 dark:border-blue-800/30 light:border-blue-200/50 flex items-center gap-3">
-                <div className="relative">
-                  <Avatar className="h-10 w-10 border border-blue-500/30">
-                    {activeConversation.image ? (
-                      <AvatarImage src={activeConversation.image} alt={activeConversation.name} />
-                    ) : (
-                      <AvatarFallback className="bg-blue-700 text-white">
-                        {activeConversation.name.charAt(0)}
-                      </AvatarFallback>
+              <div className="p-3 border-b border-blue-800/30 dark:border-blue-800/30 light:border-blue-200/50 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <Avatar className="h-10 w-10 border border-blue-500/30">
+                      {activeConversation.image ? (
+                        <AvatarImage src={activeConversation.image} alt={activeConversation.name} />
+                      ) : (
+                        <AvatarFallback className="bg-blue-700 text-white">
+                          {activeConversation.name.charAt(0)}
+                        </AvatarFallback>
+                      )}
+                    </Avatar>
+                    {activeConversation.online && (
+                      <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-green-500 border-2 border-slate-900"></span>
                     )}
-                  </Avatar>
-                  {activeConversation.online && (
-                    <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-green-500 border-2 border-slate-900"></span>
-                  )}
+                  </div>
+                  <div>
+                    <h2 className="font-medium text-white">{activeConversation.name}</h2>
+                    <p className="text-xs text-blue-400">{activeConversation.online ? "Active now" : "Offline"}</p>
+                  </div>
                 </div>
-                <div>
-                  <h2 className="font-medium text-white">{activeConversation.name}</h2>
-                  <p className="text-xs text-blue-400">{activeConversation.online ? "Online" : "Offline"}</p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="text-blue-300 hover:text-blue-100 hover:bg-blue-900/50"
+                  >
+                    <Phone className="h-5 w-5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="text-blue-300 hover:text-blue-100 hover:bg-blue-900/50"
+                  >
+                    <Video className="h-5 w-5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="text-blue-300 hover:text-blue-100 hover:bg-blue-900/50"
+                  >
+                    <Info className="h-5 w-5" />
+                  </Button>
                 </div>
               </div>
 
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {messages.length > 0 ? (
-                  messages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={cn("flex", message.senderId === user.id ? "justify-end" : "justify-start")}
-                    >
-                      <div className="flex gap-2 max-w-[80%]">
-                        {message.senderId !== user.id && (
-                          <Avatar className="h-8 w-8 mt-1 border border-blue-500/30">
-                            {message.senderImage ? (
-                              <AvatarImage src={message.senderImage} alt={message.senderName} />
-                            ) : (
-                              <AvatarFallback className="bg-blue-700 text-white">
-                                {message.senderName.charAt(0)}
-                              </AvatarFallback>
-                            )}
-                          </Avatar>
-                        )}
-                        <div>
-                          <div className="flex items-baseline gap-2">
-                            {message.senderId !== user.id && (
-                              <span className="text-sm font-medium text-blue-300">{message.senderName}</span>
-                            )}
-                            <span className="text-xs text-blue-400">{formatTime(message.timestamp)}</span>
-                          </div>
-                          <div className="flex items-end gap-1">
-                            <Card
-                              className={cn(
-                                "mt-1",
-                                message.senderId === user.id
-                                  ? "bg-blue-600 border-blue-700 text-white"
-                                  : "bg-slate-800 border-blue-900/50 text-blue-100",
-                              )}
-                            >
-                              <CardContent className="p-3 text-sm">{message.content}</CardContent>
-                            </Card>
-                            {message.senderId === user.id && getStatusIcon(message.status)}
-                          </div>
-                        </div>
+              <div className="flex-1 overflow-y-auto p-4 space-y-6">
+                {groupedMessages.length > 0 ? (
+                  groupedMessages.map((group, groupIndex) => (
+                    <div key={groupIndex} className="space-y-4">
+                      <div className="flex justify-center">
+                        <div className="bg-blue-900/30 text-blue-300 text-xs px-3 py-1 rounded-full">{group.date}</div>
                       </div>
+
+                      {group.messages.map((message, messageIndex) => {
+                        // Check if this message is from the same sender as the previous one
+                        const prevMessage = messageIndex > 0 ? group.messages[messageIndex - 1] : null
+                        const isSameSender = prevMessage && prevMessage.senderId === message.senderId
+                        const showSender = !isSameSender
+
+                        return (
+                          <div
+                            key={message.id}
+                            className={cn("flex", message.isOwnMessage ? "justify-end" : "justify-start")}
+                          >
+                            <div className="flex gap-2 max-w-[80%]">
+                              {!message.isOwnMessage && showSender && (
+                                <Avatar className="h-8 w-8 mt-1 border border-blue-500/30">
+                                  {message.senderImage ? (
+                                    <AvatarImage src={message.senderImage} alt={message.senderName} />
+                                  ) : (
+                                    <AvatarFallback className="bg-blue-700 text-white">
+                                      {message.senderName.charAt(0)}
+                                    </AvatarFallback>
+                                  )}
+                                </Avatar>
+                              )}
+                              {!message.isOwnMessage && !showSender && (
+                                <div className="w-8" /> // Spacer for alignment
+                              )}
+                              <div>
+                                {!message.isOwnMessage && showSender && (
+                                  <div className="text-sm font-medium text-blue-300 mb-1">{message.senderName}</div>
+                                )}
+                                <div className="flex items-end gap-1">
+                                  <Card
+                                    className={cn(
+                                      message.isOwnMessage
+                                        ? "bg-blue-600 border-blue-700 text-white rounded-2xl rounded-br-none"
+                                        : "bg-slate-800 border-blue-900/50 text-blue-100 rounded-2xl rounded-bl-none",
+                                    )}
+                                  >
+                                    <CardContent className="p-3 text-sm">{message.content}</CardContent>
+                                  </Card>
+                                  {message.isOwnMessage && getStatusIcon(message.status)}
+                                </div>
+                                <div className="text-xs text-blue-400 mt-1 ml-1">{formatTime(message.timestamp)}</div>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
                   ))
                 ) : (
                   <div className="flex items-center justify-center h-full">
-                    <p className="text-blue-300">No messages yet. Start the conversation!</p>
+                    <div className="text-center">
+                      <MessageCircle className="h-12 w-12 text-blue-400 mx-auto mb-4 opacity-50" />
+                      <p className="text-blue-300">No messages yet. Start the conversation!</p>
+                    </div>
                   </div>
                 )}
                 <div ref={messagesEndRef} />
@@ -685,34 +776,75 @@ export default function ChatPage() {
 
               {/* Message input */}
               <div className="p-3 border-t border-blue-800/30 dark:border-blue-800/30 light:border-blue-200/50">
-                <form onSubmit={handleSendMessage} className="flex gap-2">
-                  <Input
-                    placeholder={isConnected ? "Type a message..." : "Type a message (will send when online)..."}
-                    className="bg-slate-800/50 border-blue-800/30 text-white"
-                    value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
-                  />
+                <form onSubmit={handleSendMessage} className="flex items-center gap-2">
                   <Button
-                    type="submit"
-                    className="bg-blue-600 hover:bg-blue-700 text-white"
-                    disabled={!newMessage.trim()}
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-blue-300 hover:text-blue-100 hover:bg-blue-900/50"
                   >
-                    <Send className="h-4 w-4" />
-                    <span className="sr-only">Send</span>
+                    <Paperclip className="h-5 w-5" />
                   </Button>
+                  <div className="relative flex-1">
+                    <Input
+                      placeholder={isConnected ? "Type a message..." : "Type a message (will send when online)..."}
+                      className="bg-slate-800/50 border-blue-800/30 text-white pr-20 rounded-full"
+                      value={newMessage}
+                      onChange={(e) => setNewMessage(e.target.value)}
+                    />
+                    <div className="absolute right-2 top-1/2 transform -translate-y-1/2 flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-blue-300 hover:text-blue-100 hover:bg-blue-900/50"
+                      >
+                        <ImageIcon className="h-5 w-5" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-blue-300 hover:text-blue-100 hover:bg-blue-900/50"
+                      >
+                        <Smile className="h-5 w-5" />
+                      </Button>
+                    </div>
+                  </div>
+                  {newMessage.trim() ? (
+                    <Button
+                      type="submit"
+                      size="icon"
+                      className="bg-blue-600 hover:bg-blue-700 text-white rounded-full h-10 w-10"
+                      disabled={!newMessage.trim()}
+                    >
+                      <Send className="h-5 w-5" />
+                      <span className="sr-only">Send</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="icon"
+                      className="bg-blue-600 hover:bg-blue-700 text-white rounded-full h-10 w-10"
+                    >
+                      <Mic className="h-5 w-5" />
+                      <span className="sr-only">Voice message</span>
+                    </Button>
+                  )}
                 </form>
               </div>
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center">
-                <MessageCircle className="h-12 w-12 text-blue-400 mx-auto mb-4" />
-                <h2 className="text-xl font-medium text-white mb-2">No conversation selected</h2>
-                <p className="text-blue-300">Select a conversation to start chatting</p>
-                <Button className="mt-4 bg-blue-600 hover:bg-blue-700 text-white" onClick={handleCreateConversation}>
-                  <PlusCircle className="h-4 w-4 mr-2" />
-                  Start a new conversation
-                </Button>
+                <MessageCircle className="h-16 w-16 text-blue-400 mx-auto mb-6 opacity-50" />
+                <h2 className="text-2xl font-medium text-white mb-3">Welcome to Holla</h2>
+                <p className="text-blue-300 mb-6 max-w-md">
+                  Search for users to start a conversation or select an existing conversation from the sidebar.
+                </p>
+                <div className="flex justify-center">
+                  <UserSearch />
+                </div>
               </div>
             </div>
           )}

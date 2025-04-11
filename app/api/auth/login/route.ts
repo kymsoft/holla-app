@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { compare } from "bcryptjs"
-import { PrismaClient } from "@prisma/client"
-
-const prisma = new PrismaClient()
+import prisma from "@/lib/prisma"
 
 export async function POST(request: Request) {
   try {
@@ -38,8 +36,9 @@ export async function POST(request: Request) {
     })
 
     // Set session cookie
-    const cookieStore = await cookies();
-    cookieStore.set("session_id", session.id, {
+    ;(await
+      // Set session cookie
+      cookies()).set("session_id", session.id, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       maxAge: 30 * 24 * 60 * 60, // 30 days

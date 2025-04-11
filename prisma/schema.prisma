@@ -22,10 +22,10 @@ model User {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  sessions         Session[]
-  messages         Message[]
-  participants     Participant[]
-  messageDeliveries MessageDelivery[]
+  sessions      Session[]
+  messages      Message[]
+  participants  Participant[]
+  messageStatus MessageStatus[]
 }
 
 model Session {
@@ -70,16 +70,16 @@ model Message {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  sender       User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  deliveries   MessageDelivery[]
+  sender       User           @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  conversation Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  status       MessageStatus[]
 }
 
-model MessageDelivery {
+model MessageStatus {
   id          String    @id @default(cuid())
   messageId   String
   userId      String
-  status      String    // pending, delivered, read
+  status      String    // sent, delivered, read
   deliveredAt DateTime?
   readAt      DateTime?
   createdAt   DateTime  @default(now())

@@ -6,8 +6,7 @@ export async function POST(request: Request) {
   try {
     const { userId, isGroup, name, userIds } = await request.json()
 
-    const sessionCookies = await cookies()
-    const sessionId = sessionCookies.get("session_id")?.value
+    const sessionId = (await cookies()).get("session_id")?.value
 
     if (!sessionId) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 })
@@ -20,8 +19,7 @@ export async function POST(request: Request) {
     })
 
     if (!session || session.expires < new Date()) {
-      const sessionCookies = await cookies()
-      sessionCookies.delete("session_id")
+      (await cookies()).delete("session_id")
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 })
     }
 
@@ -58,6 +56,7 @@ export async function POST(request: Request) {
                   id: true,
                   name: true,
                   image: true,
+                  isOnline: true,
                 },
               },
             },
@@ -65,13 +64,22 @@ export async function POST(request: Request) {
         },
       })
 
+      // Format participants for response
+      const formattedParticipants = conversation.participants.map((p) => ({
+        id: p.user.id,
+        name: p.user.name,
+        image: p.user.image,
+        isOnline: p.user.isOnline,
+      }))
+
       return NextResponse.json({
         conversation: {
           id: conversation.id,
           name: conversation.name,
           isGroup: conversation.isGroup,
+          participants: formattedParticipants,
           unread: 0,
-          online: false,
+          online: formattedParticipants.some((p) => p.id !== currentUserId && p.isOnline),
         },
       })
     } else {
@@ -114,6 +122,25 @@ export async function POST(request: Request) {
               },
             },
           },
+          messages: {
+            orderBy: {
+              createdAt: "desc",
+            },
+            take: 1,
+            include: {
+              sender: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              status: {
+                where: {
+                  userId: currentUserId,
+                },
+              },
+            },
+          },
         },
       })
 
@@ -123,13 +150,27 @@ export async function POST(request: Request) {
           (participant) => participant.userId !== currentUserId,
         )?.user
 
+        // Count unread messages
+        const unreadCount = await prisma.messageStatus.count({
+          where: {
+            userId: currentUserId,
+            status: { in: ["sent", "delivered"] },
+            message: {
+              conversationId: existingConversation.id,
+              senderId: { not: currentUserId },
+            },
+          },
+        })
+
         return NextResponse.json({
           conversation: {
             id: existingConversation.id,
             name: otherUser?.name || "Unknown User",
             image: otherUser?.image,
             isGroup: false,
-            unread: 0,
+            lastMessage: existingConversation.messages[0]?.content,
+            lastMessageTime: existingConversation.messages[0]?.createdAt,
+            unread: unreadCount,
             online: otherUser?.isOnline || false,
           },
         })
